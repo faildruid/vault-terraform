@@ -1,0 +1,287 @@
+{
+  "assistant_personality": {
+    "role": "senior infrastructure-as-code architect / senior platform architect",
+    "tone": "concise, highly technical, zero fluff",
+    "reasoning_style": [
+      "systems-thinking",
+      "security-first",
+      "production-ready",
+      "proactive risk detection",
+      "implementation-first output"
+    ],
+    "output_rules": [
+      "run tools first, show results, then stop",
+      "no preamble, no pleasantries, no narration",
+      "deliver zipped artifacts when project phase completes",
+      "actively identify weak assumptions and edge cases without being asked"
+    ]
+  },
+  "user_preferences": {
+    "infra": ["Terraform", "HashiCorp Vault", "Kubernetes", "Helm", "AWX"],
+    "coding_style": "implementation-first with full inline documentation",
+    "response_style": "minimal fluff, tools first",
+    "deliverables": "production-ready, fully documented, zipped on completion",
+    "ci_tooling": ["GitHub Actions", "tflint", "terraform fmt"],
+    "secret_management": "HashiCorp Vault AppRole + KV v2"
+  },
+  "project": {
+    "name": "vault-terraform",
+    "goal": "Fully declarative Vault configuration — KV v2 engines, HCL policies, AppRole auth, credential storage, sample secrets — deployed via Terraform and GitOps",
+    "stack": [
+      "Terraform >= 1.7.0",
+      "hashicorp/vault provider ~> 4.4.0",
+      "GitHub Actions CI",
+      "S3 remote state (template provided)",
+      "HashiCorp Vault KV v2 + AppRole"
+    ],
+    "status": "COMPLETE — all resources defined, fully documented inline, zipped and delivered"
+  },
+  "architecture": {
+    "services": [
+      {
+        "name": "network-atm-secrets",
+        "type": "KV v2 engine",
+        "purpose": "ATM network device credentials + all AppRole bootstrap credential storage"
+      },
+      {
+        "name": "network-data-secrets",
+        "type": "KV v2 engine",
+        "purpose": "Data-plane switch and router credentials"
+      },
+      {
+        "name": "network-lb-secrets",
+        "type": "KV v2 engine",
+        "purpose": "Load balancer credentials (F5, NGINX, HAProxy)"
+      },
+      {
+        "name": "network-security-secrets",
+        "type": "KV v2 engine",
+        "purpose": "Firewall and security appliance credentials"
+      },
+      {
+        "name": "auth/approle",
+        "type": "Vault auth backend",
+        "purpose": "AppRole auth for AWX and SMS consumers — 8 roles total"
+      }
+    ],
+    "databases": [
+      {
+        "name": "Terraform remote state",
+        "type": "S3 + DynamoDB",
+        "notes": "Template provided in environments/dev/backend.hcl — not yet populated with real values"
+      }
+    ],
+    "secret_flows": [
+      {
+        "flow": "bootstrap",
+        "description": "Terraform generates secret_ids → writes role_id+secret_id to network-atm-secrets KV → consuming system reads from KV → authenticates to AppRole → receives scoped token"
+      },
+      {
+        "flow": "self-rotation",
+        "description": "Application token (nwpci-self-secret-id policy) → POST /v1/auth/approle/role/<role>/secret-id → store new secret_id → revoke old via accessor"
+      },
+      {
+        "flow": "sms-credential-paths",
+        "pattern": "network-atm-secrets/global/vault/<environment>/sms/<role-name>"
+      },
+      {
+        "flow": "awx-credential-paths",
+        "pattern": "network-atm-secrets/global/vault/dev/<environment>/<role-name>"
+      }
+    ],
+    "integrations": [
+      {
+        "system": "AWX",
+        "role": "consumer",
+        "access": "read-only (ro policies) on respective KV engines",
+        "auth": "AppRole nwpci-awx-nwauto / nwpci-awx-nwdata / nwpci-awx-nwlb / nwpci-awx-nwsec"
+      },
+      {
+        "system": "SMS",
+        "role": "owner",
+        "access": "full CRUD (rw policies) on respective KV engines",
+        "auth": "AppRole nwpci-sms-nwauto / nwpci-sms-nwdata / nwpci-sms-lb / nwpci-sms-nwsec"
+      },
+      {
+        "system": "GitHub Actions",
+        "role": "CI pipeline",
+        "auth": "CI AppRole (provisioned out-of-band) + OIDC to AWS for S3 state"
+      }
+    ]
+  },
+  "decisions": [
+    {
+      "id": "D1",
+      "decision": "All AppRole bootstrap credentials stored in network-atm-secrets regardless of domain",
+      "rationale": "Centralises credential management; avoids cross-engine policy complexity"
+    },
+    {
+      "id": "D2",
+      "decision": "Policy HCL generated via .tftpl templates parameterised by mount path",
+      "rationale": "Eliminates copy-paste drift; guarantees capability consistency across all four engines"
+    },
+    {
+      "id": "D3",
+      "decision": "AppRole auth backend enabled once in root/auth.tf; modules use data source reference",
+      "rationale": "Prevents resource conflict when the approle module is instantiated eight times"
+    },
+    {
+      "id": "D4",
+      "decision": "nwpci-self-secret-id policy uses + wildcard",
+      "rationale": "One shared rotation policy for all roles; avoids eight duplicate policies"
+    },
+    {
+      "id": "D5",
+      "decision": "Sample secrets written as for_each resource in root/main.tf, not via kv_secret module",
+      "rationale": "Sample payload schema (username/password) differs from credential schema (role_id/secret_id)"
+    },
+    {
+      "id": "D6",
+      "decision": "secret_id_num_uses = 0 (unlimited) as default",
+      "rationale": "Suits long-running daemons; operators override to 1 for single-use CI jobs per environment"
+    },
+    {
+      "id": "D7",
+      "decision": "delete_all_versions = false on kv_secret destroy",
+      "rationale": "Preserves audit trail via soft-delete rather than hard-purge on terraform destroy"
+    },
+    {
+      "id": "D8",
+      "decision": "environment variable validated at plan time against allowlist [dev, staging, prod]",
+      "rationale": "Prevents KV path injection from typos; fails fast at plan not apply"
+    },
+    {
+      "id": "D9",
+      "decision": "All secret_id outputs marked sensitive=true throughout the module chain",
+      "rationale": "Redacted in plan/apply console; accessible only via terraform output -json with deliberate intent"
+    },
+    {
+      "id": "D10",
+      "decision": "Makefile destroy target requires typed environment name confirmation",
+      "rationale": "Prevents accidental terraform destroy in staging or production"
+    }
+  ],
+  "constraints": [
+    "No hardcoded secrets in any .tf file",
+    "terraform.tfvars must never be committed to source control (.gitignored)",
+    "*.tfstate must never be committed to source control",
+    "Terraform provider pinned at ~> 4.4.0; no alpha/beta features",
+    "Terraform minimum version >= 1.7.0",
+    "CI apply only on push to main or explicit workflow_dispatch — no auto-apply on PR",
+    "PCI-DSS naming convention enforced: nwpci- prefix on all roles and policies",
+    "Credential expiry metadata required on every secret (expiry_date, pwd_rotation_data, pwd_rotation_method)",
+    "S3 remote state must have SSE encryption enabled in all non-local environments"
+  ],
+  "risks": [
+    {
+      "id": "R1",
+      "severity": "medium",
+      "risk": "nwpci-self-secret-id wildcard policy allows any AppRole token to generate a secret_id for any role",
+      "mitigation": "Acceptable with current trust model; replace + with literal role name if zero-trust between roles is required"
+    },
+    {
+      "id": "R2",
+      "severity": "high",
+      "risk": "Bootstrap secret_ids stored in Terraform state — plaintext on disk if S3 backend not configured",
+      "mitigation": "Enforce S3 backend with SSE before any team-shared or CI apply"
+    },
+    {
+      "id": "R3",
+      "severity": "medium",
+      "risk": "secret_id_ttl = 0 means a never-rotated secret_id is valid indefinitely",
+      "mitigation": "Set finite secret_id_ttl (e.g. 720h) in staging/prod; ensure rotation tooling is operational"
+    },
+    {
+      "id": "R4",
+      "severity": "low",
+      "risk": "AWX credential path contains literal 'dev' prefix regardless of target environment",
+      "mitigation": "Confirm path convention with operations team; may need to change to awx/ prefix"
+    },
+    {
+      "id": "R5",
+      "severity": "high",
+      "risk": "CI AppRole is not managed by this Terraform config — must be provisioned out-of-band",
+      "mitigation": "Document bootstrap procedure; create separate Terraform workspace for CI AppRole provisioning"
+    },
+    {
+      "id": "U1",
+      "type": "unknown",
+      "question": "Does SMS rotation tooling consume pwd_rotation_data / expiry_date metadata, or does a separate scheduler drive rotation?"
+    },
+    {
+      "id": "U2",
+      "type": "unknown",
+      "question": "Vault seal type (Shamir vs cloud KMS) — determines whether seal_wrap should be enabled on KV engines"
+    },
+    {
+      "id": "TD1",
+      "type": "technical_debt",
+      "description": "credential_expiry_date is a static string shared across all credentials — real use requires per-role or per-secret expiry driven by a rotation management layer"
+    },
+    {
+      "id": "TD2",
+      "type": "technical_debt",
+      "description": "No Vault audit log backend configured — required for PCI compliance; vault_audit resource missing from current config"
+    }
+  ],
+  "file_structure": {
+    "root": ["main.tf", "auth.tf", "variables.tf", "outputs.tf", "terraform.tfvars.example", "Makefile", ".gitignore"],
+    "modules": {
+      "kv_engine": ["main.tf", "variables.tf", "outputs.tf"],
+      "policy": ["main.tf", "variables.tf", "outputs.tf", "templates/kv_read_list.tftpl", "templates/kv_full_access.tftpl"],
+      "approle": ["main.tf", "auth_backend.tf", "variables.tf", "outputs.tf"],
+      "kv_secret": ["main.tf", "variables.tf", "outputs.tf"]
+    },
+    "environments": {
+      "dev": ["backend.hcl", "terraform.tfvars"]
+    },
+    "ci": [".github/workflows/terraform.yml"]
+  },
+  "coding_conventions": {
+    "module_structure": "each module has main.tf / variables.tf / outputs.tf — no merged files",
+    "resource_naming": "singleton resources within a module use 'this' as the resource name",
+    "documentation": "every resource attribute has an explanatory inline comment; every variable uses heredoc description block",
+    "policy_generation": "template-driven via .tftpl files — never inline heredoc for repeated patterns",
+    "iteration": "for_each over count for stable key-addressed resource sets",
+    "dependencies": "explicit depends_on where Terraform cannot infer from references",
+    "sensitive_outputs": "marked sensitive=true at every layer in the module output chain"
+  },
+  "next_actions": [
+    {
+      "priority": 1,
+      "action": "Add vault_audit resource to root config",
+      "detail": "File or syslog backend required for PCI compliance — current config has no audit log backend"
+    },
+    {
+      "priority": 2,
+      "action": "Provision CI AppRole out-of-band",
+      "detail": "Create separate Terraform workspace or manual bootstrap for CI service account AppRole with minimal policy scope"
+    },
+    {
+      "priority": 3,
+      "action": "Populate environments/dev/backend.hcl with real S3 values",
+      "detail": "Set bucket, key, region, dynamodb_table, role_arn; enable SSE; test with make init ENV=dev"
+    },
+    {
+      "priority": 4,
+      "action": "Create environments/staging/ and environments/prod/",
+      "detail": "Add backend.hcl and terraform.tfvars per environment; set secret_id_num_uses=1 and finite secret_id_ttl in prod"
+    },
+    {
+      "priority": 5,
+      "action": "Populate bind_secret_id_cidr_list per environment",
+      "detail": "Restrict AppRole secret_id usage to known AWX and SMS host IP ranges"
+    },
+    {
+      "priority": 6,
+      "action": "Confirm AWX credential path convention",
+      "detail": "Clarify whether global/vault/dev/<env>/<role> is correct for staging/prod or should use global/vault/awx/<env>/<role>"
+    },
+    {
+      "priority": 7,
+      "action": "Document and wire rotation tooling integration",
+      "detail": "Confirm which system reads expiry_date and pwd_rotation_data; determine if Terraform needs to manage rotation schedule or only metadata schema"
+    }
+  ],
+  "restore_prompt": "You are a senior infrastructure-as-code architect and senior platform engineer. Resume this session using all architecture state, decisions, constraints, and risks in this document as authoritative. Do not revisit settled design decisions. Do not add preamble, pleasantries, or narration. Run tools first, show results, then stop. Active project: vault-terraform — a Terraform configuration managing HashiCorp Vault KV v2 engines, AppRole auth, HCL policies, credential storage, and sample secrets for a Network PCI platform. The codebase is complete and zipped. Continue from next_actions in priority order. Coding standards: full inline documentation on all files, implementation-first, production-ready, tools-first output style, no filler."
+}
