@@ -1,0 +1,89 @@
+# =============================================================================
+# KV v2 Full Access Policy Template
+#
+# Access level: FULL ACCESS (owner)
+# Consumer:     SMS (Secret Management Service)
+# Mount:        ${mount}
+#
+# Grants the ability to:
+#   - Create, read, update, delete secret payloads (all versions)
+#   - Create, read, update, delete secret metadata and custom_metadata
+#   - Soft-delete specific versions (recoverable)
+#   - Permanently destroy specific versions (irrecoverable)
+#   - Undelete soft-deleted versions within the retention window
+#   - Browse key names
+#   - Read and update engine-level configuration (max_versions, CAS settings)
+#
+# Security note on the /config path:
+#   The last stanza grants read + update on the engine config endpoint.
+#   This allows the SMS consumer to change engine-wide settings like
+#   max_versions and cas_required. Remove this stanza if the SMS role
+#   should not be able to change engine configuration — limit config
+#   changes to a separate operator role.
+#
+# KV v2 delete semantics:
+#   /delete/<path>   — soft delete: marks versions as deleted, recoverable
+#   /undelete/<path> — recover a soft-deleted version
+#   /destroy/<path>  — hard delete: permanently purges specific versions
+#   DELETE on /metadata/<path> — deletes all versions and the path entirely
+#
+# All delete/destroy operations are logged in Vault audit logs.
+# =============================================================================
+
+# Create new versions and update existing secrets.
+# DELETE on /data/<path> is a soft-delete of the latest version.
+# API: POST /v1/${mount}/data/<path>  (create/update)
+# API: GET  /v1/${mount}/data/<path>  (read latest or specific version)
+path "${mount}/data/*" {
+  capabilities = ["create", "read", "update", "delete"]
+}
+
+# Full management of secret metadata including custom_metadata.
+# Metadata is NOT versioned — updates overwrite the current metadata.
+# DELETE on /metadata/<path> permanently deletes all versions and the path.
+# API: POST /v1/${mount}/metadata/<path>  (create/update metadata)
+# API: GET  /v1/${mount}/metadata/<path>  (read metadata)
+# API: LIST /v1/${mount}/metadata/<prefix> (list paths)
+# API: DELETE /v1/${mount}/metadata/<path> (destroy all versions + path)
+path "${mount}/metadata/*" {
+  capabilities = ["create", "read", "update", "delete", "list"]
+}
+
+# Permanently destroy specific secret versions (irrecoverable).
+# Useful for purging individual versions containing sensitive data
+# without destroying the entire secret path and all its versions.
+# API: POST /v1/${mount}/destroy/<path>  body: { "versions": [1, 2, 3] }
+path "${mount}/destroy/*" {
+  capabilities = ["update"]
+}
+
+# Recover soft-deleted secret versions.
+# A soft-deleted version can be undeleted until it is either destroyed
+# or the delete_version_after window expires.
+# API: POST /v1/${mount}/undelete/<path>  body: { "versions": [1, 2] }
+path "${mount}/undelete/*" {
+  capabilities = ["update"]
+}
+
+# Soft-delete specific secret versions (recoverable).
+# This is distinct from the delete capability on /data/<path> which
+# only soft-deletes the latest version.
+# API: POST /v1/${mount}/delete/<path>  body: { "versions": [1, 2] }
+path "${mount}/delete/*" {
+  capabilities = ["update"]
+}
+
+# Read key names within a secret path without reading values.
+# API: GET /v1/${mount}/subkeys/<path>
+path "${mount}/subkeys/*" {
+  capabilities = ["read"]
+}
+
+# Read and update the KV engine backend configuration.
+# Controls: max_versions (per-engine default), cas_required, delete_version_after.
+# Remove if the SMS role should NOT be permitted to change engine settings.
+# API: POST /v1/${mount}/config  (update)
+# API: GET  /v1/${mount}/config  (read current config)
+path "${mount}/config" {
+  capabilities = ["read", "update"]
+}

@@ -1,0 +1,61 @@
+# =============================================================================
+# KV v2 Read / List Policy Template
+#
+# Access level: READ-ONLY (consumer)
+# Consumer:     AWX (Ansible AWX automation)
+# Mount:        ${mount}
+#
+# Grants the ability to:
+#   - Browse the secret path hierarchy (list)
+#   - Read secret payloads (latest and specific versions)
+#   - Read secret metadata including custom_metadata fields
+#   - Browse key names within a secret (subkeys)
+#
+# Does NOT grant the ability to:
+#   - Create or update secrets
+#   - Delete secrets (soft or hard)
+#   - Modify metadata
+#   - Change engine configuration
+#
+# KV v2 path anatomy:
+#   ${mount}/data/<path>     — the secret payload, versioned
+#   ${mount}/metadata/<path> — version history + custom_metadata, NOT versioned
+#   ${mount}/subkeys/<path>  — key names at a path without their values
+#
+# The metadata path requires two separate capability stanzas because
+# Vault evaluates each path+capability combination independently.
+# A single stanza combining ["read", "list"] is also valid but two stanzas
+# makes the intent more explicit for policy reviewers.
+# =============================================================================
+
+# List all secret paths at any depth under this mount.
+# Required for: vault kv list ${mount}/<prefix>
+# API: LIST /v1/${mount}/metadata/<path>
+path "${mount}/metadata/*" {
+  capabilities = ["list"]
+}
+
+# Read version metadata and custom_metadata for any secret path.
+# Returns: version numbers, creation/deletion timestamps, custom_metadata map.
+# Required for: vault kv metadata get ${mount}/<path>
+# API: GET /v1/${mount}/metadata/<path>
+path "${mount}/metadata/*" {
+  capabilities = ["read"]
+}
+
+# Read the latest (or a specific version) of any secret's data payload.
+# Returns: { data: { key: value, ... }, metadata: { version, created_time, ... } }
+# Required for: vault kv get ${mount}/<path>
+# Required for: vault kv get -version=<n> ${mount}/<path>
+# API: GET /v1/${mount}/data/<path>?version=<n>
+path "${mount}/data/*" {
+  capabilities = ["read"]
+}
+
+# Read key names within a secret without their values.
+# Useful for consumers that need to know what keys exist in a secret
+# before deciding whether to read the full payload.
+# API: GET /v1/${mount}/subkeys/<path>
+path "${mount}/subkeys/*" {
+  capabilities = ["read"]
+}

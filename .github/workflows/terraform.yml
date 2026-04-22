@@ -1,0 +1,269 @@
+###############################################################################
+# .github/workflows/terraform.yml
+#
+# CI/CD pipeline for Vault Terraform configuration.
+#
+# Pipeline stages:
+#   lint    — fmt-check + tflint on all .tf files
+#   plan    — terraform init + validate + plan (posts output to PR as comment)
+#   apply   — terraform apply using the saved plan artifact
+#
+# Trigger matrix:
+#   Pull request to main → lint + plan (no apply)
+#   Push to main         → lint + plan + apply (targets dev environment)
+#   workflow_dispatch    → lint + plan + apply (operator selects env + action)
+#
+# Authentication model:
+#   Vault:      CI AppRole credentials stored as GitHub Actions secrets.
+#               The pipeline logs in, obtains a short-lived token, and exports
+#               VAULT_TOKEN for the duration of the job.
+#   AWS (state): OIDC-based role assumption — no long-lived AWS keys stored.
+#               Requires an IAM OIDC provider configured for GitHub Actions.
+#
+# Required GitHub Actions secrets:
+#   VAULT_ADDR                   — Vault server URL
+#   CI_VAULT_ROLE_ID             — AppRole role_id for the CI service account
+#   CI_VAULT_SECRET_ID           — AppRole secret_id for the CI service account
+#   SAMPLE_SECRET_PASSWORD       — Sample device secret password (TF_VAR_*)
+#   AWS_TERRAFORM_STATE_ROLE_ARN — IAM role ARN for S3 remote state access
+###############################################################################
+
+name: Vault Terraform
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "**.tf"
+      - "**.tftpl"
+      - "**.tfvars.example"
+      - ".github/workflows/terraform.yml"
+
+  push:
+    branches: [main]
+    paths:
+      - "**.tf"
+      - "**.tftpl"
+
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment"
+        required: true
+        default: "dev"
+        type: choice
+        options: [dev, staging, prod]
+      action:
+        description: "Terraform action to run"
+        required: true
+        default: "plan"
+        type: choice
+        options: [plan, apply]
+
+# Restrict default token permissions to read-only.
+# Only grant additional permissions where explicitly needed.
+permissions:
+  contents: read
+  pull-requests: write   # Required to post plan output as a PR comment
+  id-token: write        # Required for OIDC authentication to AWS for remote state
+
+env:
+  TF_VERSION:     "1.9.5"
+  TFLINT_VERSION: "0.53.0"
+  VAULT_ADDR:     ${{ secrets.VAULT_ADDR }}
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # lint: format check + tflint
+  # Runs on every trigger before plan or apply.
+  # A failed lint blocks the plan job via the 'needs: lint' dependency.
+  # ---------------------------------------------------------------------------
+  lint:
+    name: Lint & Format Check
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform ${{ env.TF_VERSION }}
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      # Fails with a diff if any .tf file is not formatted correctly.
+      # Run 'make fmt' locally to fix formatting before pushing.
+      - name: Terraform format check
+        run: terraform fmt -recursive -check -diff
+
+      - name: Setup TFLint ${{ env.TFLINT_VERSION }}
+        uses: terraform-linters/setup-tflint@v4
+        with:
+          tflint_version: ${{ env.TFLINT_VERSION }}
+
+      # tflint catches common Terraform anti-patterns, deprecated syntax,
+      # and provider-specific errors not caught by 'terraform validate'.
+      - name: Run TFLint
+        run: tflint --recursive --format compact
+
+  # ---------------------------------------------------------------------------
+  # plan: initialise, validate, and generate an execution plan
+  # Posts the plan output as a comment on PRs.
+  # Uploads the plan file as a build artifact for the apply job to consume.
+  # ---------------------------------------------------------------------------
+  plan:
+    name: Plan (${{ inputs.environment || 'dev' }})
+    runs-on: ubuntu-latest
+    needs: lint
+    # 'environment' maps to a GitHub Actions environment, which can require
+    # manual approval before the job runs (configure in repo Settings > Environments).
+    environment: ${{ inputs.environment || 'dev' }}
+
+    env:
+      ENV: ${{ inputs.environment || 'dev' }}
+      # TF_VAR_* env vars are picked up automatically by Terraform as variable values.
+      TF_VAR_sample_secret_password: ${{ secrets.SAMPLE_SECRET_PASSWORD }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform ${{ env.TF_VERSION }}
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      # OIDC-based AWS credential assumption — no long-lived access keys stored.
+      # Provides credentials for the S3 backend and DynamoDB state lock table.
+      # continue-on-error=true allows the pipeline to proceed without S3 state
+      # (falls back to local state) when AWS credentials are not configured.
+      - name: Configure AWS credentials for remote state
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_TERRAFORM_STATE_ROLE_ARN }}
+          aws-region: eu-west-1
+        continue-on-error: true
+
+      # Authenticate to Vault using the CI AppRole credentials.
+      # The resulting VAULT_TOKEN is masked in logs (::add-mask::) and
+      # exported to the job environment for subsequent Terraform steps.
+      - name: Authenticate to Vault
+        run: |
+          VAULT_TOKEN=$(vault write -field=token auth/approle/login \
+            role_id="${{ secrets.CI_VAULT_ROLE_ID }}" \
+            secret_id="${{ secrets.CI_VAULT_SECRET_ID }}")
+          echo "VAULT_TOKEN=${VAULT_TOKEN}" >> $GITHUB_ENV
+          echo "::add-mask::${VAULT_TOKEN}"
+
+      # -upgrade ensures provider versions are resolved against the registry
+      # on first run. The .terraform.lock.hcl file pins versions after init.
+      - name: Terraform init
+        run: terraform init -backend-config=environments/${{ env.ENV }}/backend.hcl -upgrade
+
+      # Validates HCL syntax and provider schema conformance.
+      # Catches typos, missing required attributes, and type mismatches.
+      - name: Terraform validate
+        run: terraform validate
+
+      # -detailed-exitcode: exits 0=no changes, 1=error, 2=changes pending.
+      # continue-on-error=true allows the comment posting step to run even
+      # when the plan produces an error — so the error is visible in the PR.
+      - name: Terraform plan
+        id: plan
+        run: |
+          terraform plan \
+            -var-file=environments/${{ env.ENV }}/terraform.tfvars \
+            -out=tfplan-${{ env.ENV }} \
+            -no-color 2>&1 | tee plan-output.txt
+        continue-on-error: true
+
+      # Post the plan output as a collapsible comment on the PR.
+      # Truncates at 60,000 characters to stay within GitHub comment size limits.
+      - name: Post plan output to PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const plan = fs.readFileSync('plan-output.txt', 'utf8');
+            const body = plan.length > 60000
+              ? plan.substring(0, 60000) + '\n\n... [output truncated — see CI logs for full plan]'
+              : plan;
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `## Terraform Plan — \`${{ env.ENV }}\`\n\n<details><summary>Show plan</summary>\n\n\`\`\`hcl\n${body}\n\`\`\`\n</details>`
+            });
+
+      # Upload the binary plan file so the apply job can consume it without
+      # re-running plan. This ensures apply executes exactly what was reviewed.
+      - name: Upload plan artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan-${{ env.ENV }}
+          path: tfplan-${{ env.ENV }}
+          retention-days: 7
+
+      # Fail the plan job if terraform plan itself returned an error (exit code 1).
+      # Exit code 2 (changes pending) is acceptable.
+      - name: Fail if plan errored
+        if: steps.plan.outcome == 'failure'
+        run: exit 1
+
+  # ---------------------------------------------------------------------------
+  # apply: execute the saved plan
+  # Only runs on push to main (auto-apply dev) or explicit workflow_dispatch.
+  # Downloads the plan artifact uploaded by the plan job to guarantee
+  # apply executes exactly the plan that was reviewed.
+  # ---------------------------------------------------------------------------
+  apply:
+    name: Apply (${{ inputs.environment || 'dev' }})
+    runs-on: ubuntu-latest
+    needs: plan
+    if: |
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_dispatch' && inputs.action == 'apply')
+    environment: ${{ inputs.environment || 'dev' }}
+
+    env:
+      ENV: ${{ inputs.environment || 'dev' }}
+      TF_VAR_sample_secret_password: ${{ secrets.SAMPLE_SECRET_PASSWORD }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform ${{ env.TF_VERSION }}
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Configure AWS credentials for remote state
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_TERRAFORM_STATE_ROLE_ARN }}
+          aws-region: eu-west-1
+        continue-on-error: true
+
+      - name: Authenticate to Vault
+        run: |
+          VAULT_TOKEN=$(vault write -field=token auth/approle/login \
+            role_id="${{ secrets.CI_VAULT_ROLE_ID }}" \
+            secret_id="${{ secrets.CI_VAULT_SECRET_ID }}")
+          echo "VAULT_TOKEN=${VAULT_TOKEN}" >> $GITHUB_ENV
+          echo "::add-mask::${VAULT_TOKEN}"
+
+      - name: Terraform init
+        run: terraform init -backend-config=environments/${{ env.ENV }}/backend.hcl
+
+      # Download the exact plan file generated in the plan job.
+      # Applying from a saved plan file bypasses the re-plan step and
+      # guarantees no drift between what was reviewed and what is applied.
+      - name: Download plan artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: tfplan-${{ env.ENV }}
+
+      - name: Terraform apply
+        run: terraform apply tfplan-${{ env.ENV }}

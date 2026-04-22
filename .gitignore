@@ -1,0 +1,53 @@
+###############################################################################
+# .gitignore — Vault Terraform project
+###############################################################################
+
+# ── Terraform state ─────────────────────────────────────────────────────────
+# State files contain plaintext secrets (secret_ids, passwords).
+# NEVER commit state to source control.
+# Use encrypted remote state (S3+SSE, Terraform Cloud) in all shared environments.
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+
+# ── Variable files with secrets ─────────────────────────────────────────────
+# terraform.tfvars holds real credential values — never commit.
+# .example files are the safe-to-commit templates.
+terraform.tfvars
+!terraform.tfvars.example
+environments/**/terraform.tfvars
+!environments/**/terraform.tfvars.example
+
+# ── Terraform working directory ──────────────────────────────────────────────
+# .terraform/ contains downloaded providers and module cache.
+# .terraform.lock.hcl pins provider versions — COMMIT this file.
+.terraform/
+
+# ── Saved plan files ─────────────────────────────────────────────────────────
+# Plan files (tfplan-*) may contain sensitive variable values in binary form.
+# Upload to CI artifact storage instead of committing.
+*.tfplan
+tfplan-*
+
+# ── Crash logs ───────────────────────────────────────────────────────────────
+crash.log
+crash.*.log
+
+# ── Local override files ─────────────────────────────────────────────────────
+# override.tf files are for local developer overrides — not for sharing.
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# ── Terraform CLI config ─────────────────────────────────────────────────────
+.terraformrc
+terraform.rc
+
+# ── Editor and OS artefacts ──────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db

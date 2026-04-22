@@ -1,0 +1,41 @@
+###############################################################################
+# terraform.tfvars.example
+#
+# Safe-to-commit template showing all configurable variables.
+# Copy to terraform.tfvars and populate with real values before running.
+# terraform.tfvars is .gitignored — never commit it with real credentials.
+#
+# For environment-specific deployments, use:
+#   environments/<env>/terraform.tfvars
+# and pass it explicitly:
+#   terraform plan -var-file=environments/dev/terraform.tfvars
+###############################################################################
+
+# Full URL of the Vault server. Must include scheme and port.
+# The hashicorp/vault provider appends API paths to this base URL.
+vault_address = "https://vault.example.internal:8200"
+
+# Deployment environment. Controls KV path segments throughout.
+# Allowed values: dev | staging | prod
+# Changing this after an initial apply will create new KV paths and leave
+# the old paths in place — clean up old paths manually or destroy first.
+environment = "dev"
+
+# AppRole token TTL. Controls how long automation tokens remain valid after login.
+# Short TTLs reduce blast radius from leaked tokens. Default 1h suits most jobs.
+approle_token_ttl = "1h"
+
+# Hard ceiling on token lifetime including renewals. After this duration the
+# application must re-authenticate (call AppRole login again).
+approle_token_max_ttl = "4h"
+
+# ISO 8601 date stored in custom_metadata.expiry_date on all secrets.
+# Rotation tooling reads this field to schedule credential renewal.
+# This is informational — Vault does not enforce it automatically.
+credential_expiry_date = "2027-04-01"
+
+# Password stored in sample device secrets written to each engine.
+# Replace with a real value or inject via environment variable:
+#   export TF_VAR_sample_secret_password="your-password-here"
+# Never commit a real password to source control.
+sample_secret_password = "CHANGE_ME"
